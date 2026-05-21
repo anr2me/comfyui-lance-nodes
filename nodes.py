@@ -174,6 +174,7 @@ def _materialise_companion_files(safetensors_path: str, tmpdir: str) -> str:
 
     # Map: filename on disk → metadata key (used when the file is absent)
     companion_map = {
+        "generation_config.json": "generation_config_json",
         "llm_config.json":        "llm_config_json",
         "tokenizer_config.json":  "tokenizer_config_json",
         "tokenizer.json":         "tokenizer_json",
@@ -334,7 +335,7 @@ def _load_lance_pipeline(
     os.makedirs(llm_tmpdir, exist_ok=True)
     llm_dir = _materialise_companion_files(llm_file, llm_tmpdir)
 
-    llm_config_path = os.path.join(llm_dir, "llm_config.json")
+    llm_config_path = os.path.join(llm_dir, "generation_config.json")
     llm_config: Qwen2Config = Qwen2Config.from_json_file(llm_config_path)
     llm_config.apply_qwen_2_5_vl_pos_emb = True
     language_model = Qwen2ForCausalLM(llm_config)
