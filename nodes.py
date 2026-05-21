@@ -174,12 +174,12 @@ def _materialise_companion_files(safetensors_path: str, tmpdir: str) -> str:
 
     # Map: filename on disk → metadata key (used when the file is absent)
     companion_map = {
-        "llm_config.json":        "llm_config",
-        "tokenizer_config.json":  "tokenizer_config",
-        "tokenizer.json":         "tokenizer",
-        "special_tokens_map.json":"special_tokens_map",
-        "vocab.json":             "vocab",
-        "merges.txt":             "merges",
+        "llm_config.json":        "llm_config_json",
+        "tokenizer_config.json":  "tokenizer_config_json",
+        "tokenizer.json":         "tokenizer_json",
+        "special_tokens_map.json":"special_tokens_map_json",
+        "vocab.json":             "vocab_json",
+        "merges.txt":             "merges_txt",
         "config.json":            "config",         # ViT
     }
 
