@@ -1,1 +1,4 @@
 
+[submodule "Lance"]
+	path = Lance
+	url = https://github.com/bytedance/Lance.git
