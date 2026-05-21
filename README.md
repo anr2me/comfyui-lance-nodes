@@ -44,7 +44,7 @@ separate clone or `PYTHONPATH` export is required.
 ```bash
 cd ComfyUI/custom_nodes
 
-git clone --recurse-submodules https://github.com/your-repo/comfyui-lance-nodes.git
+git clone --recurse-submodules https://github.com/anr2me/comfyui-lance-nodes.git
 ```
 
 If you already cloned without `--recurse-submodules`:
@@ -54,7 +54,13 @@ cd comfyui-lance-nodes
 git submodule update --init --recursive
 ```
 
-ComfyUI Manager will also call `install.py` automatically on first load, which
+Install requirements.txt:
+
+```bash
+pip install -r requirements.txt
+```
+
+Note: ComfyUI Manager will also install `requirements.txt` and call `install.py` automatically on first load, which
 runs `git submodule update --init --recursive` and installs Lance's Python
 dependencies.
 
@@ -94,9 +100,10 @@ Download from
 and place companion files beside the weights:
 
 ```
-ComfyUI/models/LLM/lance_3b/
+ComfyUI/models/LLM/lance_3b/  ← (or lance_3b_video)
+  generation_config.json
   llm_config.json
-  model.safetensors        ← (or ema.safetensors)
+  model.safetensors           ← (or ema.safetensors)
   tokenizer.json
   tokenizer_config.json
   special_tokens_map.json
@@ -107,7 +114,7 @@ ComfyUI/models/clip_vision/lance_vit/
   vit.safetensors
 
 ComfyUI/models/vae/
-  wan_vae.safetensors
+  wan2.2_vae.safetensors
 ```
 
 > The nodes automatically detect whether companion files are present on disk
