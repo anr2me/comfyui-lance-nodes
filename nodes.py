@@ -37,17 +37,16 @@ _ensure_lance_on_path()
 # ---------------------------------------------------------------------------
 # ComfyUI model-directory helpers
 #
-#   model.safetensors (main checkpoint + tokenizer) → ComfyUI/models/diffusion_models/
-#   vit.safetensors (vision encoder)                → ComfyUI/models/text_encoders/
-#   VAE weights  → ComfyUI/models/vae/
+#   LLM checkpoint + tokenizer  → ComfyUI/models/LLM/
+#   ViT (vision encoder)        → ComfyUI/models/clip_vision/
+#   VAE weights                 → ComfyUI/models/vae/
+#
+# Each of the LLM and ViT entries is a SINGLE .safetensors file whose
+# companion config/tokenizer JSON files may either sit beside it on disk
+# OR be embedded in the safetensors metadata header under keys such as
+# "llm_config", "tokenizer_config", "config", etc.
+# (see https://huggingface.co/anr2me/bytedance_lance)
 # ---------------------------------------------------------------------------
-
-def _list_subdirs(base: Path) -> list[str]:
-    """Return immediate child directory names, or a placeholder if empty."""
-    if not base.exists():
-        return ["<not found>"]
-    dirs = sorted(d.name for d in base.iterdir() if d.is_dir())
-    return dirs or ["<empty>"]
 
 def _list_safetensors(base: Path) -> list[str]:
     """Return *.safetensors filenames directly inside *base*."""
@@ -56,21 +55,22 @@ def _list_safetensors(base: Path) -> list[str]:
     files = sorted(f.name for f in base.iterdir() if f.suffix == ".safetensors")
     return files or ["<empty>"]
 
-def _diffusion_models_dir() -> Path:
-    # folder_paths registers 'diffusion_models' in recent ComfyUI versions.
-    # Fall back gracefully for older installs.
+def _llm_dir() -> Path:
+    """models/LLM/ — main Lance checkpoint + tokenizer."""
     try:
-        paths = folder_paths.get_folder_paths("diffusion_models")
+        # ComfyUI does not register "LLM" by default; use models_dir fallback.
+        paths = folder_paths.get_folder_paths("LLM")
         return Path(paths[0])
     except Exception:
-        return Path(folder_paths.models_dir) / "diffusion_models"
+        return Path(folder_paths.models_dir) / "LLM"
 
-def _text_encoders_dir() -> Path:
+def _clip_vision_dir() -> Path:
+    """models/clip_vision/ — ViT (vision encoder) weights."""
     try:
-        paths = folder_paths.get_folder_paths("text_encoders")
+        paths = folder_paths.get_folder_paths("clip_vision")
         return Path(paths[0])
     except Exception:
-        return Path(folder_paths.models_dir) / "text_encoders"
+        return Path(folder_paths.models_dir) / "clip_vision"
 
 def _vae_dir() -> Path:
     try:
@@ -78,6 +78,158 @@ def _vae_dir() -> Path:
         return Path(paths[0])
     except Exception:
         return Path(folder_paths.models_dir) / "vae"
+
+
+# ---------------------------------------------------------------------------
+# Embedded-metadata helpers
+#
+# The anr2me/bytedance_lance HF files store every companion JSON directly
+# inside the safetensors header so no sidecar files are needed.
+# Metadata keys used:
+#
+#   LLM file   : "llm_config"        → llm_config.json  (Qwen2Config)
+#                "tokenizer_config"  → tokenizer_config.json
+#                "tokenizer"         → tokenizer.json  (vocab + merges)
+#                "special_tokens_map"→ special_tokens_map.json
+#
+#   ViT file   : "config"            → config.json  (Qwen2_5_VLVisionConfig)
+# ---------------------------------------------------------------------------
+
+def _read_safetensors_metadata(path: str) -> dict:
+    """
+    Return the metadata dict from a safetensors file header without loading
+    any tensors.  Falls back to {} on any error.
+    """
+    try:
+        from safetensors import safe_open
+        with safe_open(path, framework="pt", device="cpu") as f:
+            return dict(f.metadata()) if f.metadata() else {}
+    except Exception as e:
+        print(f"[LanceNodes] Could not read metadata from {path}: {e}")
+        return {}
+
+
+def _resolve_json(
+    safetensors_path: str,
+    sidecar_path: str,
+    metadata_key: str,
+) -> dict:
+    """
+    Return a parsed JSON dict, preferring the sidecar file if it exists,
+    and falling back to the value stored under *metadata_key* in the
+    safetensors header.
+
+    Raises FileNotFoundError if neither source is available.
+    """
+    if os.path.isfile(sidecar_path):
+        with open(sidecar_path) as fh:
+            return json.load(fh)
+
+    meta = _read_safetensors_metadata(safetensors_path)
+    if metadata_key in meta:
+        raw = meta[metadata_key]
+        return json.loads(raw)
+
+    raise FileNotFoundError(
+        f"Companion file '{os.path.basename(sidecar_path)}' not found beside "
+        f"'{safetensors_path}' and metadata key '{metadata_key}' is absent from "
+        "the safetensors header.\n"
+        "Download a self-contained file from "
+        "https://huggingface.co/anr2me/bytedance_lance or place the companion "
+        "JSON files in the same directory."
+    )
+
+
+def _resolve_text(
+    safetensors_path: str,
+    sidecar_path: str,
+    metadata_key: str,
+) -> str:
+    """Like _resolve_json but returns the raw string (for tokenizer vocab etc.)."""
+    if os.path.isfile(sidecar_path):
+        with open(sidecar_path) as fh:
+            return fh.read()
+
+    meta = _read_safetensors_metadata(safetensors_path)
+    if metadata_key in meta:
+        return meta[metadata_key]
+
+    raise FileNotFoundError(
+        f"Companion file '{os.path.basename(sidecar_path)}' not found beside "
+        f"'{safetensors_path}' and metadata key '{metadata_key}' is absent from "
+        "the safetensors header."
+    )
+
+
+def _materialise_companion_files(safetensors_path: str, tmpdir: str) -> str:
+    """
+    Ensure every companion file that a HuggingFace *from_pretrained* call
+    expects actually exists on disk, materialising any that are missing by
+    extracting them from the safetensors header.
+
+    Returns the directory to pass to from_pretrained / from_json_file.
+    """
+    model_dir = os.path.dirname(safetensors_path)
+    meta = _read_safetensors_metadata(safetensors_path)
+
+    # Map: filename on disk → metadata key (used when the file is absent)
+    companion_map = {
+        "llm_config.json":        "llm_config",
+        "tokenizer_config.json":  "tokenizer_config",
+        "tokenizer.json":         "tokenizer",
+        "special_tokens_map.json":"special_tokens_map",
+        "vocab.json":             "vocab",
+        "merges.txt":             "merges",
+        "config.json":            "config",         # ViT
+    }
+
+    # Check whether every companion already exists alongside the weights
+    all_present = all(
+        os.path.isfile(os.path.join(model_dir, fname))
+        for fname in companion_map
+        if fname in (os.listdir(model_dir) or []) or fname in meta
+    )
+
+    # If any required companion is missing from model_dir, work in tmpdir
+    missing = [
+        fname for fname, key in companion_map.items()
+        if key in meta and not os.path.isfile(os.path.join(model_dir, fname))
+    ]
+
+    if not missing:
+        return model_dir  # everything already on disk beside the weights
+
+    # Write missing companions to tmpdir, copy the weights path there too
+    # so that from_pretrained(tmpdir) can find everything in one place.
+    import shutil
+    out_dir = tmpdir
+
+    # Symlink / copy the safetensors itself so tokenizer loading can find it
+    dst_weights = os.path.join(out_dir, os.path.basename(safetensors_path))
+    if not os.path.exists(dst_weights):
+        try:
+            os.symlink(os.path.abspath(safetensors_path), dst_weights)
+        except OSError:
+            shutil.copy2(safetensors_path, dst_weights)
+
+    # Copy any sidecar files that DO exist
+    for fname in companion_map:
+        src = os.path.join(model_dir, fname)
+        dst = os.path.join(out_dir, fname)
+        if os.path.isfile(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+
+    # Write companions extracted from metadata
+    for fname, key in companion_map.items():
+        dst = os.path.join(out_dir, fname)
+        if os.path.exists(dst):
+            continue
+        if key not in meta:
+            continue
+        with open(dst, "w") as fh:
+            fh.write(meta[key])
+
+    return out_dir
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +254,8 @@ _LANCE_CACHE: Dict[str, Any] = {}
 
 
 def _load_lance_pipeline(
-    model_dir: str,
-    vit_dir: str,
+    llm_file: str,
+    vit_file: str,
     vae_file: str,
     device: str,
     dtype: str,
@@ -113,24 +265,24 @@ def _load_lance_pipeline(
 
     Parameters
     ----------
-    model_dir : absolute path to the model folder inside models/diffusion_models/
-                Must contain llm_config.json + tokenizer files +
-                model.safetensors (or ema.safetensors)
-    vit_dir   : absolute path to the ViT folder inside models/text_encoders/
-                Must contain config.json + vit.safetensors
+    llm_file  : absolute path to the LLM .safetensors inside models/LLM/
+                Companion files (llm_config.json, tokenizer files) are read
+                from the same directory OR extracted from the file's metadata
+                header when absent (self-contained HF format).
+    vit_file  : absolute path to the ViT .safetensors inside models/clip_vision/
+                config.json is read from the same directory OR from metadata.
     vae_file  : absolute path to the VAE .safetensors inside models/vae/
-                (Lance's WanVideoVAE loads its own architecture; the file
-                 provides the learned weights)
     device    : 'cuda' or 'cpu'
     dtype     : 'bf16' or 'fp16'
     """
-    cache_key = f"{model_dir}|{vit_dir}|{vae_file}|{device}|{dtype}"
+    cache_key = f"{llm_file}|{vit_file}|{vae_file}|{device}|{dtype}"
     if cache_key in _LANCE_CACHE:
         return _LANCE_CACHE[cache_key]
 
     # ---- delayed imports so ComfyUI loads even if Lance submodule is absent --
     try:
         import warnings
+        import tempfile
         warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
         warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
 
@@ -161,31 +313,49 @@ def _load_lance_pipeline(
     t0 = time.perf_counter()
     print(
         f"[LanceNodes] Loading pipeline\n"
-        f"  Model : {model_dir}\n"
-        f"  ViT   : {vit_dir}\n"
-        f"  VAE   : {vae_file}"
+        f"  LLM : {llm_file}\n"
+        f"  ViT : {vit_file}\n"
+        f"  VAE : {vae_file}"
     )
 
+    # We may need to materialise companion JSONs from metadata into a temp dir.
+    # Keep it alive for the whole function by opening it here.
+    _tmpdir_ctx = tempfile.TemporaryDirectory(prefix="lance_nodes_")
+    tmpdir = _tmpdir_ctx.name
+
     # ------------------------------------------------------------------
-    # LLM + main checkpoint  (diffusion_models/<folder>/)
+    # LLM + main checkpoint  (models/LLM/<file>.safetensors)
+    #
+    # Companion files required by Qwen2Config / Qwen2Tokenizer:
+    #   llm_config.json, tokenizer_config.json, tokenizer.json,
+    #   special_tokens_map.json, vocab.json, merges.txt
     # ------------------------------------------------------------------
-    llm_config: Qwen2Config = Qwen2Config.from_json_file(
-        os.path.join(model_dir, "llm_config.json")
-    )
+    llm_tmpdir = os.path.join(tmpdir, "llm")
+    os.makedirs(llm_tmpdir, exist_ok=True)
+    llm_dir = _materialise_companion_files(llm_file, llm_tmpdir)
+
+    llm_config_path = os.path.join(llm_dir, "llm_config.json")
+    llm_config: Qwen2Config = Qwen2Config.from_json_file(llm_config_path)
     llm_config.apply_qwen_2_5_vl_pos_emb = True
     language_model = Qwen2ForCausalLM(llm_config)
 
     # ------------------------------------------------------------------
-    # ViT  (text_encoders/<folder>/)
+    # ViT  (models/clip_vision/<file>.safetensors)
+    #
+    # Companion file required: config.json  (Qwen2_5_VLVisionConfig)
     # ------------------------------------------------------------------
+    vit_tmpdir = os.path.join(tmpdir, "vit")
+    os.makedirs(vit_tmpdir, exist_ok=True)
+    vit_dir = _materialise_companion_files(vit_file, vit_tmpdir)
+
     vit_config = Qwen2_5_VLVisionConfig.from_pretrained(vit_dir)
     vit_model = Qwen2_5_VisionTransformerPretrainedModel(vit_config)
-    vit_weights = load_file(os.path.join(vit_dir, "vit.safetensors"))
+    vit_weights = load_file(vit_file)   # always load weights from the original file
     vit_model.load_state_dict(vit_weights, strict=True)
     _clean_memory(vit_weights)
 
     # ------------------------------------------------------------------
-    # VAE  (vae/<file>.safetensors)
+    # VAE  (models/vae/<file>.safetensors)
     # ------------------------------------------------------------------
     vae_model = WanVideoVAE()
     if os.path.isfile(vae_file):
@@ -233,24 +403,15 @@ def _load_lance_pipeline(
         training_args=_InferenceArgs(),
     )
 
-    # Load main model checkpoint from model_dir
-    ema_path  = os.path.join(model_dir, "ema.safetensors")
-    ckpt_path = os.path.join(model_dir, "model.safetensors")
-    load_path = ckpt_path if os.path.exists(ckpt_path) else (
-                ema_path  if os.path.exists(ema_path)  else None)
-    if load_path is None:
-        raise FileNotFoundError(
-            f"No Lance checkpoint found in '{model_dir}'.\n"
-            "Expected 'model.safetensors' or 'ema.safetensors'."
-        )
-    print(f"[LanceNodes] Loading checkpoint: {load_path}")
-    state_dict = load_file(load_path, device="cpu")
+    # Load main model checkpoint — the LLM .safetensors IS the checkpoint
+    print(f"[LanceNodes] Loading checkpoint: {llm_file}")
+    state_dict = load_file(llm_file, device="cpu")
     state_dict.pop("latent_pos_embed.pos_embed", None)
     model.load_state_dict(state_dict, strict=False)
     _clean_memory(state_dict)
 
-    # Tokenizer (lives alongside the main model weights in diffusion_models/)
-    tokenizer = Qwen2Tokenizer.from_pretrained(model_dir)
+    # Tokenizer — use materialised companion dir so from_pretrained finds all files
+    tokenizer = Qwen2Tokenizer.from_pretrained(llm_dir)
     tokenizer, new_token_ids, num_new_tokens = add_special_tokens(tokenizer)
     if num_new_tokens > 0:
         model.language_model.resize_token_embeddings(len(tokenizer))
@@ -266,8 +427,10 @@ def _load_lance_pipeline(
     model     = model.to(device=dev, dtype=torch_dtype).eval()
     vae_model = vae_model.to(device=dev).eval()
 
+    # Keep the temp dir alive as long as the pipeline is cached
     result = (model, vae_model, tokenizer, new_token_ids, image_token_id, dev, torch_dtype)
     _LANCE_CACHE[cache_key] = result
+    _LANCE_CACHE[cache_key + "__tmpdir"] = _tmpdir_ctx   # prevents GC cleanup
     print(f"[LanceNodes] Pipeline ready in {time.perf_counter() - t0:.1f}s")
     return result
 
@@ -284,22 +447,16 @@ class LanceModelLoader:
     """
     Load the Lance-3B pipeline.
 
-    Model components are split across three standard ComfyUI model directories:
+    Model components use three standard ComfyUI model directories:
 
-    • Main model checkpoint + tokenizer
-        models/diffusion_models/<folder>/
-            llm_config.json
-            model.safetensors  (or ema.safetensors)
-            tokenizer.json / tokenizer_config.json / …
+    • Main checkpoint + tokenizer  →  models/LLM/<file>.safetensors
+      (companion JSON files can be beside the .safetensors OR embedded
+       in its metadata header — compatible with anr2me/bytedance_lance HF files)
 
-    • ViT (vision encoder) weights
-        models/text_encoders/<folder>/
-            config.json
-            vit.safetensors
+    • ViT (vision encoder)  →  models/clip_vision/<file>.safetensors
+      (config.json can be beside the file OR embedded in its metadata header)
 
-    • VAE weights
-        models/vae/
-            <file>.safetensors
+    • VAE  →  models/vae/<file>.safetensors
     """
 
     CATEGORY = "Lance"
@@ -309,14 +466,14 @@ class LanceModelLoader:
 
     @classmethod
     def INPUT_TYPES(cls):
-        model_dirs = _list_subdirs(_diffusion_models_dir())
-        vit_dirs   = _list_subdirs(_text_encoders_dir())
-        vae_files  = _list_safetensors(_vae_dir())
+        llm_files = _list_safetensors(_llm_dir())
+        vit_files = _list_safetensors(_clip_vision_dir())
+        vae_files = _list_safetensors(_vae_dir())
         return {
             "required": {
-                "model_folder": (model_dirs, {"default": model_dirs[0]}),
-                "vit_folder":   (vit_dirs,   {"default": vit_dirs[0]}),
-                "vae_file":     (vae_files,  {"default": vae_files[0]}),
+                "llm_file": (llm_files, {"default": llm_files[0]}),
+                "vit_file": (vit_files, {"default": vit_files[0]}),
+                "vae_file": (vae_files, {"default": vae_files[0]}),
                 "device": (["cuda", "cpu"], {"default": "cuda"}),
                 "dtype":  (["bf16", "fp16"], {"default": "bf16"}),
             }
@@ -324,16 +481,16 @@ class LanceModelLoader:
 
     def load_model(
         self,
-        model_folder: str,
-        vit_folder: str,
+        llm_file: str,
+        vit_file: str,
         vae_file: str,
         device: str,
         dtype: str,
     ):
-        model_path = str(_diffusion_models_dir() / model_folder)
-        vit_path   = str(_text_encoders_dir()    / vit_folder)
-        vae_path   = str(_vae_dir()              / vae_file)
-        pipeline = _load_lance_pipeline(model_path, vit_path, vae_path, device, dtype)
+        llm_path = str(_llm_dir()         / llm_file)
+        vit_path = str(_clip_vision_dir() / vit_file)
+        vae_path = str(_vae_dir()         / vae_file)
+        pipeline = _load_lance_pipeline(llm_path, vit_path, vae_path, device, dtype)
         return (pipeline,)
 
 
@@ -647,8 +804,14 @@ class LanceUnloadModel:
 
     def unload(self, pipeline):
         global _LANCE_CACHE
-        for k in [k for k, v in _LANCE_CACHE.items() if v is pipeline]:
+        keys_to_del = [k for k, v in _LANCE_CACHE.items() if v is pipeline]
+        for k in keys_to_del:
             del _LANCE_CACHE[k]
+            # Also clean up the temp-dir context object kept alive alongside it
+            tmpdir_key = k + "__tmpdir"
+            if tmpdir_key in _LANCE_CACHE:
+                _LANCE_CACHE[tmpdir_key].cleanup()
+                del _LANCE_CACHE[tmpdir_key]
         del pipeline
         _clean_memory()
         print("[LanceNodes] Pipeline unloaded.")

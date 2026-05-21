@@ -44,7 +44,6 @@ separate clone or `PYTHONPATH` export is required.
 ```bash
 cd ComfyUI/custom_nodes
 
-# Clone this repo AND initialise the Lance submodule in one step:
 git clone --recurse-submodules https://github.com/your-repo/comfyui-lance-nodes.git
 ```
 
@@ -61,34 +60,58 @@ dependencies.
 
 ### 2. Place model weights
 
-Model components are split across three standard ComfyUI model directories.
-Download everything from
-[HuggingFace – bytedance-research/Lance](https://huggingface.co/bytedance-research/Lance).
+Model components sit in three ComfyUI model directories:
 
-#### Main model checkpoint + tokenizer
+| Component | Directory | File(s) |
+|-----------|-----------|---------|
+| Main checkpoint + tokenizer | `models/LLM/` | `*.safetensors` |
+| ViT (vision encoder) | `models/clip_vision/` | `*.safetensors` |
+| VAE | `models/vae/` | `*.safetensors` |
+
+#### Option A — Self-contained single files (recommended)
+
+Download the pre-packed files from
+**[anr2me/bytedance_lance](https://huggingface.co/anr2me/bytedance_lance)**
+on HuggingFace. Every companion JSON (config, tokenizer, etc.) is embedded
+in the safetensors header — no sidecar files needed:
+
 ```
-ComfyUI/models/diffusion_models/lance_model/
+ComfyUI/models/LLM/
+  lance_3b_comfyui.safetensors          ← image tasks
+  lance_3b_video_comfyui.safetensors    ← video tasks
+
+ComfyUI/models/clip_vision/
+  qwen2_5_vl_vit_comfyui.safetensors
+
+ComfyUI/models/vae/
+  wan2.2_vae.safetensors
+```
+
+#### Option B — Original files + sidecar JSONs
+
+Download from
+[bytedance-research/Lance](https://huggingface.co/bytedance-research/Lance)
+and place companion files beside the weights:
+
+```
+ComfyUI/models/LLM/lance_3b/
   llm_config.json
-  model.safetensors       ← (or ema.safetensors)
+  model.safetensors        ← (or ema.safetensors)
   tokenizer.json
   tokenizer_config.json
   special_tokens_map.json
-  vocab.json
-  merges.txt
-```
+  vocab.json  /  merges.txt
 
-#### ViT (vision encoder) weights
-```
-ComfyUI/models/text_encoders/lance_vit/
+ComfyUI/models/clip_vision/lance_vit/
   config.json
   vit.safetensors
+
+ComfyUI/models/vae/
+  wan_vae.safetensors
 ```
 
-#### VAE weights
-```
-ComfyUI/models/vae/
-  lance_vae.safetensors
-```
+> The nodes automatically detect whether companion files are present on disk
+> or need to be extracted from the safetensors metadata header.
 
 ---
 
@@ -96,14 +119,11 @@ ComfyUI/models/vae/
 
 ### Lance: Load Model
 
-Loads the pipeline once and caches it for reuse across the same ComfyUI
-session.
-
 | Input | Type | Description |
 |-------|------|-------------|
-| `model_folder` | dropdown | Subfolder in `models/diffusion_models/` — main checkpoint + tokenizer |
-| `vit_folder` | dropdown | Subfolder in `models/text_encoders/` — ViT weights |
-| `vae_file` | dropdown | `.safetensors` file in `models/vae/` |
+| `llm_file` | dropdown | `.safetensors` in `models/LLM/` — main checkpoint + tokenizer |
+| `vit_file` | dropdown | `.safetensors` in `models/clip_vision/` — ViT weights |
+| `vae_file` | dropdown | `.safetensors` in `models/vae/` |
 | `device` | `cuda` / `cpu` | Inference device |
 | `dtype` | `bf16` / `fp16` | Compute precision (bf16 recommended) |
 
