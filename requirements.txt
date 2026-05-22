@@ -1,1 +1,1 @@
-transformers<4.43
+#transformers<4.43 # might cause issue on other custom nodes
